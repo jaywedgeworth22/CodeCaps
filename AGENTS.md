@@ -74,6 +74,10 @@ handoff at `~/Library/Application Support/Usage Monitor/quota-windows.json`,
 HTTP push (`QuotaPublisher`, v2 ingest envelope), HTTP pull (`QuotaClient`,
 `FleetPipeline`).
 
+## Infisical is the source of truth
+
+`INFISICAL.md` (repo root) is binding: app-level settings live in the CodeCaps Infisical project, per-user settings stay in `UserDefaults`/Keychain, build-time constants stay in the bundle.  `Sources/QuotaCore/InfisicalSettings.swift` implements the contract — startup load into memory, memory-only reads, timer + become-active refresh with last-known-good on failure, Infisical-first write-through on admin save.  New app-level knobs go in Infisical (documented in `INFISICAL.md`), never in a new `UserDefaults` key or hardcoded constant.  Never fetch per-request; never put a per-user setting or a token in Infisical; never commit a secret value.
+
 ## Build and test
 
 ```bash

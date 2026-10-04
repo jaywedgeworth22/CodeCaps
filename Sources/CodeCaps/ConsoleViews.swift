@@ -13,6 +13,7 @@ enum ConsolePage: Hashable {
     case settingsSourcesFleet
     case settingsNotifications
     case settingsAppearance
+    case settingsInfisical
     case settingsAbout
 
     var isSettings: Bool {
@@ -32,6 +33,7 @@ enum ConsolePage: Hashable {
         case .settingsSourcesFleet: return "settingsSourcesFleet"
         case .settingsNotifications: return "settingsNotifications"
         case .settingsAppearance: return "settingsAppearance"
+        case .settingsInfisical: return "settingsInfisical"
         case .settingsAbout: return "settingsAbout"
         }
     }
@@ -45,6 +47,7 @@ enum ConsolePage: Hashable {
         case "settingsSourcesFleet": return .settingsSourcesFleet
         case "settingsNotifications": return .settingsNotifications
         case "settingsAppearance": return .settingsAppearance
+        case "settingsInfisical": return .settingsInfisical
         case "settingsAbout": return .settingsAbout
         default:
             guard value.hasPrefix("platform:") else { return nil }
@@ -61,6 +64,7 @@ enum ConsolePage: Hashable {
         case .settingsSourcesFleet: return "Sources & Fleet"
         case .settingsNotifications: return "Alerts & Alarms"
         case .settingsAppearance: return "Appearance"
+        case .settingsInfisical: return "Infisical Sync"
         case .settingsAbout: return "About"
         default: return "CodeCaps"
         }
@@ -74,13 +78,14 @@ enum ConsolePage: Hashable {
         case .settingsSourcesFleet: return "arrow.up.arrow.down.circle"
         case .settingsNotifications: return "bell.badge"
         case .settingsAppearance: return "circle.lefthalf.filled"
+        case .settingsInfisical: return "key.fill"
         case .settingsAbout: return "info.circle"
         default: return "square.grid.2x2"
         }
     }
 
     static let settingsPages: [ConsolePage] = [
-        .settingsMenuBar, .settingsPlatforms, .settingsLogoStyle, .settingsSourcesFleet, .settingsNotifications, .settingsAppearance, .settingsAbout,
+        .settingsMenuBar, .settingsPlatforms, .settingsLogoStyle, .settingsSourcesFleet, .settingsNotifications, .settingsAppearance, .settingsInfisical, .settingsAbout,
     ]
 }
 
@@ -202,6 +207,8 @@ struct ConsoleView: View {
                     SettingsNotificationsPage(model: model)
                 case .settingsAppearance:
                     SettingsAppearancePage(model: model)
+                case .settingsInfisical:
+                    SettingsInfisicalPage(model: model)
                 case .settingsAbout:
                     SettingsAboutPage(model: model, state: state)
                 }

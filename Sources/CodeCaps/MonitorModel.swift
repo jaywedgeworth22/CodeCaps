@@ -1050,6 +1050,13 @@ final class MonitorModel: ObservableObject {
             guard !cleanToken.contains("\n"), !cleanToken.contains("\r") else { throw QuotaClientError.invalidToken }
             try await TokenStore.save(cleanToken, server: value, service: TokenStore.readService)
         }
+        // Infisical is the source of truth for the pull endpoint: the write
+        // lands there before any local state moves, and a failed write fails
+        // the save — the cache and Infisical never diverge silently.  See
+        // INFISICAL.md.  A no-op until the owner provisions an identity under
+        // Settings → Infisical Sync.  Placed after the token save so a
+        // Keychain failure cannot leave Infisical ahead of the local cache.
+        try await InfisicalSettings.shared.writeThrough(value, for: InfisicalSettings.Keys.pullEndpoint)
         let savedToken = !cleanToken.isEmpty ? cleanToken : server ? await TokenStore.read(server: value, service: TokenStore.readService) : nil
         if server && savedToken == nil { throw QuotaClientError.invalidToken }
         let saved = savedToken != nil || (value == endpoint && hasSavedToken)
@@ -1096,6 +1103,13 @@ final class MonitorModel: ObservableObject {
         if !cleanToken.isEmpty {
             try await TokenStore.save(cleanToken, server: value, service: TokenStore.syncService)
         }
+        // Infisical is the source of truth for the push endpoint: the write
+        // lands there before any local state moves, and a failed write fails
+        // the save — the cache and Infisical never diverge silently.  See
+        // INFISICAL.md.  A no-op until the owner provisions an identity under
+        // Settings → Infisical Sync.  Placed after the token save so a
+        // Keychain failure cannot leave Infisical ahead of the local cache.
+        try await InfisicalSettings.shared.writeThrough(value, for: InfisicalSettings.Keys.pushEndpoint)
         let savedToken = !cleanToken.isEmpty ? cleanToken : enabled ? await TokenStore.read(server: value, service: TokenStore.syncService) : nil
         let saved = savedToken != nil || (value == syncEndpoint && hasSavedSyncToken)
 
@@ -1121,6 +1135,29 @@ final class MonitorModel: ObservableObject {
         syncTokenState = .none
         defaults.set(false, forKey: "hasSavedSyncToken")
         try await saveSyncSettings(enabled: false, endpoint: syncEndpoint, token: "", format: syncFormat)
+    }
+
+    // MARK: - Infisical Source of Truth
+
+    /// Adopts the Infisical-provided endpoints for keys the owner never set
+    /// locally, so a fresh install picks up the fleet defaults without the
+    /// owner typing them.  Called after every successful Infisical load and
+    /// refresh.  A deliberately cleared field (stored as "") is never
+    /// overridden — clearing is the owner's explicit "nowhere", and
+    /// `SettingsMigrationTests` pins that behaviour.
+    func adoptInfisicalEndpointsIfUnset() {
+        let settings = InfisicalSettings.shared
+        guard settings.isProvisioned else { return }
+        if defaults.string(forKey: "endpoint") == nil,
+           let remote = settings.value(for: InfisicalSettings.Keys.pullEndpoint) {
+            endpoint = remote
+            defaults.set(remote, forKey: "endpoint")
+        }
+        if defaults.string(forKey: "syncEndpoint") == nil,
+           let remote = settings.value(for: InfisicalSettings.Keys.pushEndpoint) {
+            syncEndpoint = remote
+            defaults.set(remote, forKey: "syncEndpoint")
+        }
     }
 
     func testAndPushSync(endpoint input: String = "", token inputToken: String = "", format inputFormat: QuotaSyncFormat? = nil) async -> (success: Bool, message: String) {

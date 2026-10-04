@@ -1215,3 +1215,246 @@ struct CommitButton: View {
         .accessibilityLabel(title)
     }
 }
+
+// MARK: - Infisical Sync
+
+/// The admin surface for Infisical as the source of truth (see INFISICAL.md).
+///
+/// CodeCaps is a single-user local app, so the owner IS the admin and the gate
+/// is a no-op by design — this page is only reachable on his own Mac.  The
+/// client identity is his own universal-auth machine identity, stored in his
+/// Keychain like the read and ingest tokens already are; it is never embedded
+/// in the app and never leaves the machine.  The iOS companion cannot hold a
+/// client secret, so it stays out of Infisical entirely and keeps reading
+/// through its existing quota API — the Mac app owns the Infisical read.
+struct SettingsInfisicalPage: View {
+    @ObservedObject var model: MonitorModel
+
+    @State private var clientId = ""
+    @State private var clientSecret = ""
+    @State private var hasIdentity = false
+    @State private var pullEndpoint = ""
+    @State private var pushEndpoint = ""
+    @State private var refreshSeconds = ""
+    @State private var working = false
+    @State private var message: String?
+    @State private var succeeded = false
+    @State private var keyMessage: String?
+    @State private var keySucceeded = false
+
+    private var settings: InfisicalSettings { InfisicalSettings.shared }
+
+    var body: some View {
+        SettingsPage {
+            Section {
+                TextField("Client ID", text: $clientId,
+                          prompt: Text(hasIdentity ? "Saved in Keychain" : "Client ID"))
+                SecureField("Client Secret", text: $clientSecret,
+                            prompt: Text(hasIdentity ? "Saved in Keychain" : "Client Secret"))
+                HStack {
+                    if hasIdentity {
+                        Button("Forget Identity", role: .destructive, action: forgetIdentity)
+                            .disabled(working)
+                    }
+                    Spacer()
+                    if working { ProgressView().controlSize(.small) }
+                    CommitButton(title: "Save Identity", prominent: !clientId.isEmpty, action: saveIdentity)
+                        .disabled(working || clientId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                  || clientSecret.isEmpty)
+                }
+                if let message {
+                    Text(message)
+                        .font(.system(size: 11))
+                        .foregroundStyle(succeeded ? Theme.accent : Theme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } header: {
+                Eyebrow("CLIENT IDENTITY")
+            } footer: {
+                Text("Your own Infisical machine identity, kept in your Keychain." + sentenceGap
+                     + "Nothing here is embedded in the app or sent anywhere but Infisical.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Section {
+                LabeledContent("Status") { Text(statusLine).font(.system(size: 11)).foregroundStyle(.secondary) }
+                LabeledContent("Environment") { Text(settingsEnvironment).font(.system(size: 11)) }
+                if let loaded = settings.lastLoadedAt {
+                    LabeledContent("Last Synced") {
+                        Text(loaded.formatted(date: .omitted, time: .shortened)).font(.system(size: 11))
+                    }
+                }
+                if let error = settings.lastError {
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack {
+                    Spacer()
+                    Button("Reload Now", action: reloadNow).disabled(working || !hasIdentity)
+                }
+            } header: {
+                Eyebrow("SYNC STATUS")
+            }
+
+            Section {
+                TextField("Pull Endpoint", text: $pullEndpoint)
+                TextField("Push Endpoint", text: $pushEndpoint)
+                TextField("Refresh Seconds", text: $refreshSeconds)
+                HStack {
+                    Spacer()
+                    if working { ProgressView().controlSize(.small) }
+                    CommitButton(title: "Save Keys", prominent: keysDirty, action: saveKeys)
+                        .disabled(working || !hasIdentity)
+                }
+                if let keyMessage = keyMessage {
+                    Text(keyMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(keySucceeded ? Theme.accent : Theme.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } header: {
+                Eyebrow("MANAGED KEYS")
+            } footer: {
+                Text("Saving writes to Infisical first; a failed write fails the save." + sentenceGap
+                     + "The pull and push pages write their endpoints through the same path.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .onAppear(perform: refreshFromStore)
+    }
+
+    private var statusLine: String {
+        hasIdentity ? "On" : "Off"
+    }
+
+    private var settingsEnvironment: String {
+        InfisicalSettings.defaultEnvironment()
+    }
+
+    private var keysDirty: Bool {
+        pullEndpoint != (settings.value(for: InfisicalSettings.Keys.pullEndpoint) ?? "")
+            || pushEndpoint != (settings.value(for: InfisicalSettings.Keys.pushEndpoint) ?? "")
+            || refreshSeconds != (settings.value(for: InfisicalSettings.Keys.refreshSeconds) ?? "")
+    }
+
+    private func refreshFromStore() {
+        hasIdentity = InfisicalIdentityStore.load() != nil
+        pullEndpoint = settings.value(for: InfisicalSettings.Keys.pullEndpoint) ?? ""
+        pushEndpoint = settings.value(for: InfisicalSettings.Keys.pushEndpoint) ?? ""
+        refreshSeconds = settings.value(for: InfisicalSettings.Keys.refreshSeconds) ?? ""
+    }
+
+    private func saveIdentity() {
+        working = true
+        message = nil
+        let identity = InfisicalIdentityStore.Identity(
+            clientId: clientId.trimmingCharacters(in: .whitespacesAndNewlines),
+            clientSecret: clientSecret)
+        Task {
+            defer { working = false }
+            do {
+                try InfisicalIdentityStore.save(identity)
+                settings.configure(InfisicalSettings.Configuration(
+                    environment: InfisicalSettings.defaultEnvironment(),
+                    clientId: identity.clientId,
+                    clientSecret: identity.clientSecret))
+                // Validate the identity immediately: a bad secret fails here,
+                // while the owner is looking at the message, not at 3 AM.
+                try await settings.load()
+                await MainActor.run {
+                    model.adoptInfisicalEndpointsIfUnset()
+                    clientSecret = ""
+                    refreshFromStore()
+                    succeeded = true
+                    message = "Identity saved and verified against Infisical."
+                    NotificationCenter.default.post(name: .infisicalIdentityChanged, object: nil)
+                }
+            } catch {
+                await MainActor.run {
+                    succeeded = false
+                    message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func forgetIdentity() {
+        working = true
+        Task {
+            defer { working = false }
+            do {
+                try InfisicalIdentityStore.delete()
+                settings.clearConfiguration()
+                await MainActor.run {
+                    clientId = ""
+                    clientSecret = ""
+                    refreshFromStore()
+                    succeeded = true
+                    message = "Identity removed.  Settings stay local until you add one again."
+                    NotificationCenter.default.post(name: .infisicalIdentityChanged, object: nil)
+                }
+            } catch {
+                await MainActor.run {
+                    succeeded = false
+                    message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func reloadNow() {
+        working = true
+        Task {
+            await settings.refresh()
+            await MainActor.run {
+                model.adoptInfisicalEndpointsIfUnset()
+                working = false
+                refreshFromStore()
+            }
+        }
+    }
+
+    private func saveKeys() {
+        working = true
+        keyMessage = nil
+        Task {
+            defer { working = false }
+            do {
+                // Write-through, one key at a time: each `set` lands in
+                // Infisical before the cache moves, and any failure aborts
+                // the save with the earlier keys already committed.
+                // Unchanged keys are skipped — no redundant writes.
+                let updates = [
+                    (InfisicalSettings.Keys.pullEndpoint, pullEndpoint),
+                    (InfisicalSettings.Keys.pushEndpoint, pushEndpoint),
+                    (InfisicalSettings.Keys.refreshSeconds, refreshSeconds),
+                ]
+                var wroteAny = false
+                for (key, field) in updates {
+                    let value = field.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard value != (settings.value(for: key) ?? "") else { continue }
+                    try await settings.set(value, for: key)
+                    wroteAny = true
+                }
+                await MainActor.run {
+                    model.adoptInfisicalEndpointsIfUnset()
+                    refreshFromStore()
+                    keySucceeded = true
+                    keyMessage = wroteAny ? "Keys saved to Infisical." : "No changes to save."
+                }
+            } catch {
+                await MainActor.run {
+                    refreshFromStore()
+                    keySucceeded = false
+                    keyMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                }
+            }
+        }
+    }
+}

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import QuotaCore
 import SwiftUI
 
 @main
@@ -89,8 +90,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }.store(in: &subscriptions)
         if model.displayMode != .menuBar && !relaunchedForUpdate { showConsole(page: nil) }
         model.start()
+        startInfisicalSync()
+        NotificationCenter.default.addObserver(
+            forName: .infisicalIdentityChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.infisicalIdentityDidChange() }
+        }
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(refresh), name: NSWorkspace.didWakeNotification, object: nil)
+    }
+
+    // MARK: - Infisical source of truth
+
+    private var infisicalRefreshTimer: Timer?
+
+    /// Loads the app-level settings from Infisical (see INFISICAL.md) when the
+    /// owner has provisioned an identity under Settings → Infisical Sync.
+    /// The load runs off the main thread and never blocks launch: until it
+    /// succeeds the app simply keeps its local values.
+    private func startInfisicalSync() {
+        Task.detached(priority: .utility) { [weak self] in
+            guard let identity = InfisicalIdentityStore.load() else { return }
+            let settings = InfisicalSettings.shared
+            settings.configure(InfisicalSettings.Configuration(
+                environment: InfisicalSettings.defaultEnvironment(),
+                clientId: identity.clientId,
+                clientSecret: identity.clientSecret))
+            await settings.refresh()
+            await MainActor.run { [weak self] in
+                self?.model.adoptInfisicalEndpointsIfUnset()
+                self?.scheduleInfisicalRefresh()
+            }
+        }
+    }
+
+    /// One-shot timer, rescheduled after every fire so a cadence change made
+    /// in Infisical itself takes effect on the next cycle.  A failed refresh
+    /// keeps serving the last-known-good cache — settings staleness is safer
+    /// than an outage.
+    private func scheduleInfisicalRefresh() {
+        infisicalRefreshTimer?.invalidate()
+        infisicalRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: InfisicalSettings.shared.refreshInterval,
+            repeats: false
+        ) { [weak self] _ in
+            Task {
+                await InfisicalSettings.shared.refresh()
+                await MainActor.run { [weak self] in
+                    self?.model.adoptInfisicalEndpointsIfUnset()
+                    self?.scheduleInfisicalRefresh()
+                }
+            }
+        }
+    }
+
+    /// (Re)starts the whole sync cycle — used at launch and whenever the
+    /// identity changes under Settings → Infisical Sync, so no relaunch is
+    /// needed.  A forgotten identity stops the timer and leaves settings local.
+    private func infisicalIdentityDidChange() {
+        infisicalRefreshTimer?.invalidate()
+        infisicalRefreshTimer = nil
+        startInfisicalSync()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard InfisicalSettings.shared.isProvisioned else { return }
+        Task {
+            await InfisicalSettings.shared.refresh()
+            await MainActor.run { [weak self] in
+                self?.model.adoptInfisicalEndpointsIfUnset()
+                self?.scheduleInfisicalRefresh()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) { model.stop() }
